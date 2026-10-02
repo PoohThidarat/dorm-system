@@ -1,0 +1,141 @@
+import {
+  calculateRemainingBalance,
+  exceedsBalance,
+  generateReceiptNumber,
+  receiptNumberPrefix,
+  statusAfterPayment,
+  calculateElectricityBill,
+  calculateLateFee,
+  calculateTotalInvoice,
+  calculateUsage,
+  calculateWaterBill,
+  generateInvoiceNumber,
+} from "../../src/utils/billing.util";
+
+// Unit Test ของ business logic การคำนวณบิล (spec ข้อ 32)
+
+describe("calculateUsage", () => {
+  it("คำนวณ Usage = Current - Previous", () => {
+    expect(calculateUsage(100, 125)).toBe(25);
+  });
+
+  it("ยอมรับกรณีมิเตอร์เท่าเดิม (ไม่ได้ใช้)", () => {
+    expect(calculateUsage(50, 50)).toBe(0);
+  });
+
+  it("ปฏิเสธเมื่อ Current น้อยกว่า Previous", () => {
+    expect(() => calculateUsage(100, 99)).toThrow();
+  });
+});
+
+describe("calculateWaterBill / calculateElectricityBill", () => {
+  it("น้ำ = หน่วย x ราคาต่อหน่วย", () => {
+    expect(calculateWaterBill(10, 18)).toBe(180);
+  });
+
+  it("ไฟ = หน่วย x ราคาต่อหน่วย", () => {
+    expect(calculateElectricityBill(120, 8)).toBe(960);
+  });
+
+  it("ปัดเศษทศนิยม 2 ตำแหน่ง", () => {
+    expect(calculateElectricityBill(3, 7.335)).toBe(22.01);
+  });
+});
+
+describe("calculateTotalInvoice", () => {
+  it("รวมค่าเช่า น้ำ ไฟ ค่าอื่น ๆ หักส่วนลด บวกค่าปรับ", () => {
+    const total = calculateTotalInvoice({
+      rent: 4000,
+      water: 180,
+      electricity: 960,
+      otherCharges: 100,
+      discount: 200,
+      fine: 50,
+    });
+    expect(total).toBe(5090);
+  });
+
+  it("บิลที่มีแต่ค่าเช่า", () => {
+    expect(
+      calculateTotalInvoice({ rent: 4000, water: 0, electricity: 0, otherCharges: 0, discount: 0, fine: 0 }),
+    ).toBe(4000);
+  });
+});
+
+describe("calculateLateFee", () => {
+  it("ไม่มีค่าปรับถ้ายังไม่เลยกำหนด", () => {
+    expect(calculateLateFee(5000, 0)).toBe(0);
+    expect(calculateLateFee(5000, -3)).toBe(0);
+  });
+
+  it("คิด 1% ต่อวันที่เกินกำหนด", () => {
+    expect(calculateLateFee(5000, 5)).toBe(250);
+  });
+
+  it("ค่าปรับสูงสุดไม่เกิน 30% ของยอดก่อนค่าปรับ", () => {
+    expect(calculateLateFee(5000, 90)).toBe(1500);
+  });
+});
+
+describe("generateInvoiceNumber", () => {
+  it("รูปแบบ INV-YYYYMM-NNNN", () => {
+    expect(generateInvoiceNumber(new Date(Date.UTC(2026, 8, 1)), 7)).toBe("INV-202609-0007");
+  });
+
+  it("เติมเลข 0 หน้าเดือนและลำดับ", () => {
+    expect(generateInvoiceNumber(new Date(Date.UTC(2026, 0, 1)), 123)).toBe("INV-202601-0123");
+  });
+});
+
+describe("generateReceiptNumber", () => {
+  it("รูปแบบ REC-YYYYMM-NNNN", () => {
+    expect(generateReceiptNumber(new Date("2026-09-15T05:00:00Z"), 3)).toBe("REC-202609-0003");
+  });
+
+  it("เดือนอิงเวลาไทย: 30 ก.ย. 18:00 UTC = 1 ต.ค. 01:00 เวลาไทย", () => {
+    expect(receiptNumberPrefix(new Date("2026-09-30T18:00:00Z"))).toBe("REC-202610-");
+  });
+
+  it("ข้ามปีตามเวลาไทย", () => {
+    expect(generateReceiptNumber(new Date("2026-12-31T17:30:00Z"), 12)).toBe("REC-202701-0012");
+  });
+});
+
+describe("calculateRemainingBalance", () => {
+  it("ยอดคงเหลือ = ยอดบิล - ยอดที่ชำระแล้ว", () => {
+    expect(calculateRemainingBalance(5000, 3000)).toBe(2000);
+  });
+
+  it("ไม่ติดลบเมื่อจ่ายเกิน", () => {
+    expect(calculateRemainingBalance(5000, 5000.5)).toBe(0);
+  });
+
+  it("ไม่เพี้ยนจากทศนิยม floating point", () => {
+    expect(calculateRemainingBalance(0.3, 0.1 + 0.2)).toBe(0);
+    expect(calculateRemainingBalance(10.1, 0.1)).toBe(10);
+  });
+});
+
+describe("statusAfterPayment", () => {
+  it("จ่ายครบ = PAID", () => {
+    expect(statusAfterPayment(5000, 5000)).toBe("PAID");
+  });
+
+  it("จ่ายบางส่วน = PARTIAL", () => {
+    expect(statusAfterPayment(5000, 2500)).toBe("PARTIAL");
+  });
+
+  it("ผลรวมทศนิยมที่ตรงยอดบิลถือว่าครบ (0.1 + 0.2 = 0.3)", () => {
+    expect(statusAfterPayment(0.3, 0.1 + 0.2)).toBe("PAID");
+  });
+});
+
+describe("exceedsBalance", () => {
+  it("เกินยอดคงเหลือ", () => {
+    expect(exceedsBalance(2000.01, 2000)).toBe(true);
+  });
+
+  it("เท่ายอดคงเหลือพอดีไม่ถือว่าเกิน", () => {
+    expect(exceedsBalance(2000, 2000)).toBe(false);
+  });
+});

@@ -1,0 +1,502 @@
+// =====================================================================
+// Dormitory Management & Maintenance System — Prisma Schema (MySQL)
+// Covers section 25 of the spec. Soft delete via deletedAt where relevant.
+// =====================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------
+// AUTH / RBAC (Phase 1)
+// ---------------------------------------------------------------------
+
+model Role {
+  id              Int              @id @default(autoincrement())
+  name            String           @unique // SUPER_ADMIN, ADMIN, TENANT, TECHNICIAN
+  description     String?
+  users           User[]
+  rolePermissions RolePermission[]
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+
+  @@map("roles")
+}
+
+model Permission {
+  id              Int              @id @default(autoincrement())
+  code            String           @unique // e.g. "room.create"
+  description     String?
+  rolePermissions RolePermission[]
+  createdAt       DateTime         @default(now())
+
+  @@map("permissions")
+}
+
+model RolePermission {
+  id           Int        @id @default(autoincrement())
+  roleId       Int
+  permissionId Int
+  role         Role       @relation(fields: [roleId], references: [id])
+  permission   Permission @relation(fields: [permissionId], references: [id])
+
+  @@unique([roleId, permissionId])
+  @@map("role_permissions")
+}
+
+model User {
+  id                     Int       @id @default(autoincrement())
+  email                  String    @unique
+  passwordHash           String
+  firstName              String
+  lastName               String
+  phone                  String?
+  isActive               Boolean   @default(true)
+  roleId                 Int
+  role                   Role      @relation(fields: [roleId], references: [id])
+  refreshTokenHash       String? // current valid refresh token (hashed)
+  resetPasswordToken     String?   @unique
+  resetPasswordExpiresAt DateTime?
+
+  tenant        Tenant?
+  technician    Technician?
+  notifications Notification[]
+  auditLogs     AuditLog[]
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  @@index([roleId])
+  @@map("users")
+}
+
+// ---------------------------------------------------------------------
+// ROOMS (Phase 2)
+// ---------------------------------------------------------------------
+
+model RoomType {
+  id        Int      @id @default(autoincrement())
+  name      String   @unique
+  rooms     Room[]
+  createdAt DateTime @default(now())
+
+  @@map("room_types")
+}
+
+enum RoomStatus {
+  AVAILABLE
+  OCCUPIED
+  RESERVED
+  MAINTENANCE
+  INACTIVE
+}
+
+model Room {
+  id          Int        @id @default(autoincrement())
+  roomNumber  String     @unique
+  floor       Int
+  roomTypeId  Int
+  roomType    RoomType   @relation(fields: [roomTypeId], references: [id])
+  monthlyRent Decimal    @db.Decimal(10, 2)
+  deposit     Decimal    @db.Decimal(10, 2)
+  status      RoomStatus @default(AVAILABLE)
+  description String?    @db.Text
+  images      Json?
+
+  contracts          RentalContract[]
+  waterMeters        WaterMeter[]
+  electricityMeters  ElectricityMeter[]
+  maintenanceTickets MaintenanceTicket[]
+  currentTenants     Tenant[]            @relation("TenantCurrentRoom")
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  @@index([status])
+  @@map("rooms")
+}
+
+// ---------------------------------------------------------------------
+// TENANTS / TECHNICIANS (Phase 2)
+// ---------------------------------------------------------------------
+
+enum TenantStatus {
+  ACTIVE
+  INACTIVE
+  MOVED_OUT
+}
+
+model Tenant {
+  id            Int          @id @default(autoincrement())
+  userId        Int          @unique
+  user          User         @relation(fields: [userId], references: [id])
+  nationalId    String       @unique
+  address       String?      @db.Text
+  status        TenantStatus @default(ACTIVE)
+  currentRoomId Int?
+  currentRoom   Room?        @relation("TenantCurrentRoom", fields: [currentRoomId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+
+  contracts          RentalContract[]
+  maintenanceTickets MaintenanceTicket[]
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  @@index([currentRoomId])
+  @@map("tenants")
+}
+
+model Technician {
+  id        Int     @id @default(autoincrement())
+  userId    Int     @unique
+  user      User    @relation(fields: [userId], references: [id])
+  specialty String?
+
+  assignments MaintenanceAssignment[]
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  @@map("technicians")
+}
+
+// ---------------------------------------------------------------------
+// CONTRACTS (Phase 2)
+// ---------------------------------------------------------------------
+
+enum ContractStatus {
+  ACTIVE
+  EXPIRED
+  TERMINATED
+}
+
+model RentalContract {
+  id          Int            @id @default(autoincrement())
+  roomId      Int
+  room        Room           @relation(fields: [roomId], references: [id])
+  tenantId    Int
+  tenant      Tenant         @relation(fields: [tenantId], references: [id])
+  startDate   DateTime
+  endDate     DateTime
+  deposit     Decimal        @db.Decimal(10, 2)
+  pdfFilePath String?
+  status      ContractStatus @default(ACTIVE)
+
+  invoices Invoice[]
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  @@index([roomId])
+  @@index([tenantId])
+  @@map("rental_contracts")
+}
+
+// ---------------------------------------------------------------------
+// BILLING (Phase 3)
+// ---------------------------------------------------------------------
+
+enum InvoiceStatus {
+  DRAFT
+  ISSUED
+  UNPAID
+  PARTIAL
+  PAID
+  OVERDUE
+  CANCELLED
+}
+
+model Invoice {
+  id            Int            @id @default(autoincrement())
+  invoiceNumber String         @unique
+  contractId    Int
+  contract      RentalContract @relation(fields: [contractId], references: [id])
+  billingMonth  DateTime // first day of billing month
+  rent          Decimal        @db.Decimal(10, 2)
+  water         Decimal        @default(0) @db.Decimal(10, 2)
+  electricity   Decimal        @default(0) @db.Decimal(10, 2)
+  otherCharges  Decimal        @default(0) @db.Decimal(10, 2)
+  discount      Decimal        @default(0) @db.Decimal(10, 2)
+  fine          Decimal        @default(0) @db.Decimal(10, 2)
+  total         Decimal        @db.Decimal(10, 2)
+  dueDate       DateTime
+  status        InvoiceStatus  @default(DRAFT)
+
+  items    InvoiceItem[]
+  payments Payment[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([contractId, billingMonth]) // ห้ามสร้าง Invoice ซ้ำเดือนเดียวกัน (rule #3)
+  @@map("invoices")
+}
+
+model InvoiceItem {
+  id        Int     @id @default(autoincrement())
+  invoiceId Int
+  invoice   Invoice @relation(fields: [invoiceId], references: [id])
+  label     String
+  amount    Decimal @db.Decimal(10, 2)
+
+  @@map("invoice_items")
+}
+
+// ---------------------------------------------------------------------
+// METERS (Phase 3)
+// ---------------------------------------------------------------------
+
+model WaterMeter {
+  id           Int            @id @default(autoincrement())
+  roomId       Int
+  room         Room           @relation(fields: [roomId], references: [id])
+  pricePerUnit Decimal        @db.Decimal(10, 2)
+  readings     WaterReading[]
+
+  @@map("water_meters")
+}
+
+model WaterReading {
+  id            Int        @id @default(autoincrement())
+  meterId       Int
+  meter         WaterMeter @relation(fields: [meterId], references: [id])
+  previousMeter Decimal    @db.Decimal(10, 2)
+  currentMeter  Decimal    @db.Decimal(10, 2)
+  usage         Decimal    @db.Decimal(10, 2)
+  total         Decimal    @db.Decimal(10, 2)
+  readingMonth  DateTime
+  createdAt     DateTime   @default(now())
+
+  @@map("water_readings")
+}
+
+model ElectricityMeter {
+  id           Int                  @id @default(autoincrement())
+  roomId       Int
+  room         Room                 @relation(fields: [roomId], references: [id])
+  pricePerUnit Decimal              @db.Decimal(10, 2)
+  readings     ElectricityReading[]
+
+  @@map("electricity_meters")
+}
+
+model ElectricityReading {
+  id            Int              @id @default(autoincrement())
+  meterId       Int
+  meter         ElectricityMeter @relation(fields: [meterId], references: [id])
+  previousMeter Decimal          @db.Decimal(10, 2)
+  currentMeter  Decimal          @db.Decimal(10, 2)
+  usage         Decimal          @db.Decimal(10, 2)
+  total         Decimal          @db.Decimal(10, 2)
+  readingMonth  DateTime
+  createdAt     DateTime         @default(now())
+
+  @@map("electricity_readings")
+}
+
+// ---------------------------------------------------------------------
+// PAYMENTS / RECEIPTS (Phase 4)
+// ---------------------------------------------------------------------
+
+enum PaymentMethod {
+  CASH
+  BANK_TRANSFER
+  QR_PAYMENT
+  ONLINE
+}
+
+enum PaymentStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+model Payment {
+  id              Int           @id @default(autoincrement())
+  invoiceId       Int
+  invoice         Invoice       @relation(fields: [invoiceId], references: [id])
+  amount          Decimal       @db.Decimal(10, 2)
+  paymentDate     DateTime
+  method          PaymentMethod
+  referenceNumber String?
+  status          PaymentStatus @default(PENDING)
+  rejectReason    String?
+
+  slips   PaymentSlip[]
+  receipt Receipt?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("payments")
+}
+
+model PaymentSlip {
+  id         Int      @id @default(autoincrement())
+  paymentId  Int
+  payment    Payment  @relation(fields: [paymentId], references: [id])
+  filePath   String
+  uploadedAt DateTime @default(now())
+
+  @@map("payment_slips")
+}
+
+model Receipt {
+  id            Int      @id @default(autoincrement())
+  receiptNumber String   @unique
+  paymentId     Int      @unique
+  payment       Payment  @relation(fields: [paymentId], references: [id])
+  issuedAt      DateTime @default(now())
+  pdfFilePath   String?
+
+  @@map("receipts")
+}
+
+// ---------------------------------------------------------------------
+// MAINTENANCE (Phase 5)
+// ---------------------------------------------------------------------
+
+enum TicketPriority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+enum TicketStatus {
+  OPEN
+  WAITING_ASSIGN
+  ASSIGNED
+  ACCEPTED
+  REJECTED
+  IN_PROGRESS
+  WAITING_CONFIRM
+  COMPLETED
+  CLOSED
+  REOPEN
+}
+
+model MaintenanceCategory {
+  id      Int                 @id @default(autoincrement())
+  name    String              @unique
+  tickets MaintenanceTicket[]
+
+  @@map("maintenance_categories")
+}
+
+model MaintenanceTicket {
+  id            Int                 @id @default(autoincrement())
+  ticketNumber  String              @unique
+  tenantId      Int
+  tenant        Tenant              @relation(fields: [tenantId], references: [id])
+  roomId        Int
+  room          Room                @relation(fields: [roomId], references: [id])
+  categoryId    Int
+  category      MaintenanceCategory @relation(fields: [categoryId], references: [id])
+  title         String
+  description   String              @db.Text
+  priority      TicketPriority      @default(MEDIUM)
+  status        TicketStatus        @default(OPEN)
+  repairCost    Decimal?            @db.Decimal(10, 2)
+  rating        Int? // 1-5
+  ratingComment String?             @db.Text
+
+  assignments MaintenanceAssignment[]
+  history     MaintenanceHistory[]
+  images      MaintenanceImage[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status])
+  @@index([tenantId])
+  @@map("maintenance_tickets")
+}
+
+model MaintenanceAssignment {
+  id           Int               @id @default(autoincrement())
+  ticketId     Int
+  ticket       MaintenanceTicket @relation(fields: [ticketId], references: [id])
+  technicianId Int
+  technician   Technician        @relation(fields: [technicianId], references: [id])
+  assignedAt   DateTime          @default(now())
+  rejectReason String?
+
+  @@map("maintenance_assignments")
+}
+
+model MaintenanceHistory {
+  id         Int               @id @default(autoincrement())
+  ticketId   Int
+  ticket     MaintenanceTicket @relation(fields: [ticketId], references: [id])
+  changedBy  Int // userId
+  fromStatus String?
+  toStatus   String
+  note       String?           @db.Text
+  createdAt  DateTime          @default(now())
+
+  @@map("maintenance_history")
+}
+
+enum ImageStage {
+  PROBLEM
+  BEFORE
+  DURING
+  AFTER
+}
+
+model MaintenanceImage {
+  id         Int               @id @default(autoincrement())
+  ticketId   Int
+  ticket     MaintenanceTicket @relation(fields: [ticketId], references: [id])
+  stage      ImageStage
+  filePath   String
+  uploadedAt DateTime          @default(now())
+
+  @@map("maintenance_images")
+}
+
+// ---------------------------------------------------------------------
+// NOTIFICATIONS / AUDIT (Phase 6 / 9)
+// ---------------------------------------------------------------------
+
+model Notification {
+  id        Int      @id @default(autoincrement())
+  userId    Int
+  user      User     @relation(fields: [userId], references: [id])
+  title     String
+  message   String   @db.Text
+  type      String
+  isRead    Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@index([userId, isRead])
+  @@map("notifications")
+}
+
+model AuditLog {
+  id        Int      @id @default(autoincrement())
+  userId    Int
+  user      User     @relation(fields: [userId], references: [id])
+  action    String
+  module    String
+  recordId  String?
+  oldValue  Json?
+  newValue  Json?
+  ipAddress String?
+  userAgent String?
+  createdAt DateTime @default(now())
+
+  @@index([module, recordId])
+  @@map("audit_logs")
+}
