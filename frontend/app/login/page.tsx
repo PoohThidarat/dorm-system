@@ -51,7 +51,7 @@ export default function LoginPage() {
           </p>
         )}
 
-        <label className="mb-1 block text-sm font-medium text-slate-700">อีเมล</label>
+        <label className="mb-1 block text-sm font-medium text-slate-700">อีเมล1</label>
         <input
           type="email"
           required
